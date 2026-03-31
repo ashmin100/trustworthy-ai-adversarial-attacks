@@ -60,8 +60,8 @@ class MNIST_CNN(nn.Module):
 
 def get_cifar10_pretrained():
     """
-    CIFAR-10용으로 사전 학습된 ResNet-20 모델을 다운로드하고 반환합니다.
-    출처(인용): chenyaofo/pytorch-cifar-models (assignment 가이드라인에 따른 오픈소스 모델 사용 허용)
+    CIFAR-10용으로 사전 학습된 ResNet-20 모델을 다운로드하고 반환
+    출처: chenyaofo/pytorch-cifar-models
     """
     print("torch.hub를 통해 사전 학습된 CIFAR-10 resnet20 모델을 불러옵니다...")
     model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True, trust_repo=True)
@@ -260,8 +260,8 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
     
     results = {}
     
-    # 가장 작은 epsilon(가장 은밀한 공격)에서 시각화 이미지를 저장합니다.
-    # → 사람 눈에 거의 인지 불가능한 수준의 섭동임을 보여주기 위함
+    # 가장 작은 epsilon에서 시각화 이미지를 저장합니다.
+    # → 사람 눈에 거의 인지 불가능한 수준의 perturbation임을 보여주기 위함
     min_eps = min(epsilons)
     
     for eps in epsilons:
@@ -270,7 +270,7 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
         success = 0
         
         saved_images = 0
-        is_targeted = "Targeted" in attack_name
+        is_targeted = (attack_name == "Targeted FGSM" or attack_name == "Targeted PGD")
         
         # 평가 속도를 최적화하기 위해, 공격별로 최소 100 샘플만 평가해도 되지만 500 샘플을 사용합니다.
         num_eval_samples = 500
@@ -322,7 +322,7 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
                 success += (adv_preds != labels).sum().item()
                 
             # 가장 작은 eps(가장 은밀한 공격)에서 이미지를 5장 저장합니다.
-            # 사람이 육안으로 거의 구별 불가능한 수준의 섭동만 시각화합니다.
+            # 사람이 육안으로 거의 구별 불가능한 수준의 perturbation만 시각화합니다.
             if eps == min_eps and saved_images < 5:
                 for i in range(len(labels)):
                     if saved_images >= 5:
@@ -352,8 +352,8 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
 
 def upsample_img(img_np, scale=4):
     """
-    PIL bicubic 업샘플링으로 이미지를 scale배 확대합니다.
-    CIFAR-10처럼 저해상도(32x32) 이미지의 시각화 품질을 높이기 위해 사용합니다.
+    PIL bicubic 업샘플링으로 이미지를 scale배 확대
+    CIFAR-10처럼 저해상도(32x32) 이미지의 시각화 품질을 높이기 용도
     """
     # float32 -> uint8 변환 후 PIL로 업샘플링
     img_uint8 = np.clip(img_np * 255, 0, 255).astype(np.uint8)
@@ -363,9 +363,16 @@ def upsample_img(img_np, scale=4):
     return np.array(pil_img).astype(np.float32) / 255.0
 
 def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cls, attack_name, dataset_name, eps, idx):
-    # 공격 방법과 타겟 여부 추출
-    method = 'FGSM' if 'FGSM' in attack_name else 'PGD'
-    target_type = 'Targeted' if 'Targeted' in attack_name else 'Untargeted'
+    # 공격 방법과 타겟 여부 추출 (정확한 문자열 비교)
+    if attack_name == "Targeted FGSM" or attack_name == "Untargeted FGSM":
+        method = "FGSM"
+    else:
+        method = "PGD"
+        
+    if attack_name == "Targeted FGSM" or attack_name == "Targeted PGD":
+        target_type = "Targeted"
+    else:
+        target_type = "Untargeted"
     
     # 결과를 저장할 디렉토리 경로: results/{dataset}/{method}/{target_type}
     save_dir = os.path.join('results', dataset_name, method, target_type)
@@ -387,7 +394,7 @@ def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cl
         adv_img  = upsample_img(adv_img,  scale=4)
     
     # 노이즈(perturbation)를 시각적으로 확대하여 표시 (x15)
-    # 실제 섭동은 매우 미세하기 때문에 크게 증폭해야 눈에 보임
+    # 실제 perturbation은 매우 미세하기 때문에 크게 증폭해야 눈에 보임
     perturbation = np.clip(np.abs(adv_img - orig_img) * 15, 0, 1)
     
     fig, axes = plt.subplots(1, 3, figsize=(10, 3))
@@ -407,7 +414,7 @@ def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cl
     axes[0].set_title(f"Original\nPred: {clean_pred_str} (True: {true_cls_str})")
     axes[0].axis('off')
     
-    if "Targeted" in attack_name:
+    if attack_name == "Targeted FGSM" or attack_name == "Targeted PGD":
         title_adv = f"Adversarial (ε={eps})\nPred: {adv_pred_str} (Target: {tgt_cls_str})"
     else:
         title_adv = f"Adversarial (ε={eps})\nPred: {adv_pred_str}"
