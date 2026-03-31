@@ -55,4 +55,3 @@ if __name__ == '__main__':
     print("개발 1단계: MNIST CNN 모델 초기화 성공!")
     model = MNIST_CNN()
     print(model)
-
