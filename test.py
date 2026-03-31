@@ -268,16 +268,16 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
         correct = 0
         total = 0
         success = 0
-        
         saved_images = 0
+        
         is_targeted = (attack_name == "Targeted FGSM" or attack_name == "Targeted PGD")
         
         # 평가 속도를 최적화하기 위해, 공격별로 최소 100 샘플만 평가해도 되지만 500 샘플을 사용합니다.
         num_eval_samples = 500
         
         for images, labels in test_loader:
-            # 500개 샘플 평가 후 종료하되, min_eps에서 시각화할 이미지를 5장 다 못 모았다면 추가 탐색
-            if total >= num_eval_samples and not (eps == min_eps and saved_images < 5):
+            # 500개 샘플 평가 후 종료하되, 현재 eps에서 시각화할 이미지를 5장 다 못 모았다면 추가 탐색
+            if total >= num_eval_samples and saved_images >= 5:
                 break
                 
             images, labels = images.to(device), labels.to(device)
@@ -321,9 +321,8 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
                 # 공격 성공: 모델 예측이 실제 정답과 달라져야 함
                 success += (adv_preds != labels).sum().item()
                 
-            # 가장 작은 eps(가장 은밀한 공격)에서 이미지를 5장 저장합니다.
-            # 사람이 육안으로 거의 구별 불가능한 수준의 perturbation만 시각화합니다.
-            if eps == min_eps and saved_images < 5:
+            # 현재 eps에 대해 이미지를 5장 저장합니다.
+            if saved_images < 5:
                 for i in range(len(labels)):
                     if saved_images >= 5:
                         break
