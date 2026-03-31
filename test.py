@@ -9,7 +9,6 @@ import random
 from tqdm import tqdm
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"사용 중인 디바이스: {device}")
 
 def set_seed(seed=42):
     random.seed(seed)
@@ -41,18 +40,13 @@ class MNIST_CNN(nn.Module):
         return x
 
 def get_cifar10_pretrained():
-    print("torch.hub를 통해 사전 학습된 CIFAR-10 resnet20 모델을 불러옵니다...")
     model = torch.hub.load("chenyaofo/pytorch-cifar-models", "cifar10_resnet20", pretrained=True, trust_repo=True)
     return model
 
 def train_mnist_model(epochs=1):
-    print("\n--- MNIST 모델 학습 시작 ---")
     transform = transforms.Compose([transforms.ToTensor()])
     train_dataset = datasets.MNIST(root='./data', train=True, download=True, transform=transform)
-    test_dataset = datasets.MNIST(root='./data', train=False, download=True, transform=transform)
-    
     train_loader = DataLoader(train_dataset, batch_size=128, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
     
     model = MNIST_CNN().to(device)
     criterion = nn.CrossEntropyLoss()
@@ -60,7 +54,6 @@ def train_mnist_model(epochs=1):
     
     model.train()
     for epoch in range(epochs):
-        running_loss = 0.0
         for images, labels in train_loader:
             images, labels = images.to(device), labels.to(device)
             optimizer.zero_grad()
@@ -68,26 +61,9 @@ def train_mnist_model(epochs=1):
             loss = criterion(outputs, labels)
             loss.backward()
             optimizer.step()
-            running_loss += loss.item()
-            
-    # 깨끗한(Clean) 데이터셋 정확도 평가
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            
-    acc = 100 * correct / total
-    print(f"MNIST Clean 테스트 정확도: {acc:.2f}% (목표 달성 기준: >= 95%)")
     return model
 
 def check_cifar10_accuracy(model):
-    print("\n--- 사전 학습된 CIFAR-10 모델 정확도 검증 ---")
     class NormalizeModel(nn.Module):
         def __init__(self, base_model):
             super().__init__()
@@ -100,28 +76,88 @@ def check_cifar10_accuracy(model):
             return self.base_model(x_norm)
             
     model = NormalizeModel(model).to(device)
-    transform = transforms.Compose([transforms.ToTensor()])
-    test_dataset = datasets.CIFAR10(root='./data', train=False, download=True, transform=transform)
-    test_loader = DataLoader(test_dataset, batch_size=128, shuffle=False)
-    
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for images, labels in test_loader:
-            images, labels = images.to(device), labels.to(device)
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-            
-    acc = 100 * correct / total
-    print(f"CIFAR-10 Clean 테스트 정확도: {acc:.2f}% (목표 달성 기준: >= 80%)")
     return model
 
+# ---------------------------------------------------------
+# 2. 적대적 공격기법 기초 (FGSM)
+# ---------------------------------------------------------
+def fgsm_targeted(model, x, target, eps):
+    """타겟 FGSM(Targeted FGSM)"""
+    x_adv = x.clone().detach().requires_grad_(True)
+    output = model(x_adv)
+    loss = F.cross_entropy(output, target)
+    model.zero_grad()
+    loss.backward()
+    
+    grad = x_adv.grad.data
+    x_adv_data = x_adv.data - eps * torch.sign(grad)
+    x_adv_data = torch.clamp(x_adv_data, 0, 1)
+    
+    return x_adv_data
+
+def fgsm_untargeted(model, x, label, eps):
+    """비타겟 FGSM(Untargeted FGSM)"""
+    x_adv = x.clone().detach().requires_grad_(True)
+    output = model(x_adv)
+    loss = F.cross_entropy(output, label)
+    model.zero_grad()
+    loss.backward()
+    
+    grad = x_adv.grad.data
+    x_adv_data = x_adv.data + eps * torch.sign(grad)
+    x_adv_data = torch.clamp(x_adv_data, 0, 1)
+    
+    return x_adv_data
+
+def evaluate_fgsm(model, device, test_loader, attack_name, epsilons):
+    print(f"\n{attack_name} 평가 중...")
+    model.eval()
+    for eps in epsilons:
+        correct = 0
+        total = 0
+        success = 0
+        is_targeted = "Targeted" in attack_name
+        
+        for images, labels in test_loader:
+            if total >= 200: # 검증용으로 빠르게 200개만 측정
+                break
+            images, labels = images.to(device), labels.to(device)
+            
+            with torch.no_grad():
+                clean_outputs = model(images)
+                _, clean_preds = torch.max(clean_outputs, 1)
+                
+            mask = (clean_preds == labels)
+            if not mask.any(): continue
+            images, labels, clean_preds = images[mask], labels[mask], clean_preds[mask]
+            
+            targets = (labels + 1) % 10 if is_targeted else None
+            
+            if is_targeted:
+                adv_images = fgsm_targeted(model, images, targets, eps)
+            else:
+                adv_images = fgsm_untargeted(model, images, labels, eps)
+                
+            with torch.no_grad():
+                adv_outputs = model(adv_images)
+                _, adv_preds = torch.max(adv_outputs, 1)
+            
+            total += len(labels)
+            if is_targeted:
+                success += (adv_preds == targets).sum().item()
+            else:
+                success += (adv_preds != labels).sum().item()
+                
+        success_rate = (success / total) * 100 if total > 0 else 0
+        print(f"Epsilon: {eps:.2f} \t 공격 성공률: {success_rate:.2f}%")
+
 if __name__ == '__main__':
-    print("개발 3단계: 두 데이터셋의 베이스라인 모델 확보 완료!")
+    print("개발 4단계: 기초 적대적 공격기법 FGSM 구현 완료!")
     mnist_model = train_mnist_model(epochs=1)
     
-    cifar_base_model = get_cifar10_pretrained()
-    cifar10_model = check_cifar10_accuracy(cifar_base_model)
+    transform = transforms.Compose([transforms.ToTensor()])
+    test_dataset = datasets.MNIST(root='./data', train=False, download=False, transform=transform)
+    test_loader = DataLoader(test_dataset, batch_size=32, shuffle=True)
+    
+    epsilons = [0.05, 0.1, 0.3]
+    evaluate_fgsm(mnist_model, device, test_loader, "Untargeted FGSM", epsilons)
