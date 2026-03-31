@@ -57,25 +57,120 @@ pillow
   예시: `results/MNIST/FGSM/Targeted/eps0.05_sample0.png`
 - **요약 표**는 실행 종료 시 콘솔에 마크다운 테이블 형태로 출력됩니다.
 
-## 주요 구현 상세
-### 1. 디바이스 자동 선택
-```python
-if torch.cuda.is_available():
-    device = torch.device('cuda')
-elif torch.backends.mps.is_available():
-    device = torch.device('mps')
-else:
-    device = torch.device('cpu')
-```
-- CUDA → MPS → CPU 순서로 자동 감지합니다.
+# 주요 구현 상세 (Adversarial Attack Implementation)
 
-### 2. 정확한 공격 타입 판별
+## 1. FGSM (Fast Gradient Sign Method)
+
+FGSM은 입력 이미지에 대해 손실 함수의 gradient 방향으로 perturbation을 추가하는 단일 단계(one-step) 공격 기법이다.
+
+수식:
+$$
+x_{adv} = x + \epsilon \cdot \mathrm{sign}(\nabla_x J(\theta, x, y))
+$$
+
+구현에서는 gradient의 sign만 사용하여 계산을 단순화하고, epsilon을 통해 perturbation 크기를 제어한다.
+
+또한 Targeted / Untargeted 공격을 다음과 같이 처리한다:
+
+```python
+if is_targeted:
+    grad = -grad
+else:
+    grad = grad
+
+x_adv = x + epsilon * grad.sign()
+```
+
+- Untargeted: 정답에서 멀어지도록 (+gradient)
+- Targeted: 특정 클래스에 가깝게 (-gradient)
+
+---
+
+## 2. PGD (Projected Gradient Descent)
+
+PGD는 FGSM을 여러 번 반복 적용하는 iterative 공격 기법으로, 더 강력한 adversarial example을 생성한다.
+
+수식:
+$$
+x^{t+1} = \Pi_{B_\epsilon(x)} \left( x^t + \alpha \cdot \mathrm{sign}(\nabla_x J(\theta, x^t, y)) \right)
+$$
+
+구현에서는 다음과 같이 반복적으로 gradient를 적용한다:
+
+```python
+for _ in range(num_steps):
+    x_adv.requires_grad = True
+    outputs = model(x_adv)
+    loss = criterion(outputs, target)
+
+    if is_targeted:
+        loss = -loss
+
+    loss.backward()
+    grad = x_adv.grad.data
+
+    x_adv = x_adv + alpha * grad.sign()
+
+    # projection (L∞ constraint)
+    x_adv = torch.clamp(x_adv, x - eps, x + eps)
+    x_adv = torch.clamp(x_adv, 0, 1)
+```
+
+PGD는 FGSM보다 더 정교하고 강력한 공격을 수행할 수 있다.
+
+---
+
+## 3. Targeted vs Untargeted Attack
+
+| 타입 | 목적 |
+|------|------|
+| Untargeted | 정답이 아니게 만들기 |
+| Targeted | 특정 클래스로 오분류 유도 |
+
+구현:
+
 ```python
 is_targeted = (attack_name == "Targeted FGSM" or attack_name == "Targeted PGD")
 ```
-- 문자열 포함이 아닌 **정확히 일치**하는 경우에만 Targeted 로 판단합니다.
 
-### 3. 시각화 저장 경로 결정 로직
+- 정확한 문자열 매칭으로 공격 타입을 구분하여 실험 재현성을 확보한다.
+
+Gradient 방향:
+
+- Untargeted → +gradient  
+- Targeted → -gradient  
+
+---
+
+## 4. Perturbation 제한 (L∞ Constraint)
+
+모든 공격은 다음 조건을 만족하도록 제한된다:
+
+$$
+||x_{adv} - x||_\infty \le \epsilon
+$$
+
+구현:
+
+```python
+x_adv = torch.clamp(x_adv, x - eps, x + eps)
+```
+
+- 각 픽셀의 최대 변화량을 제한하여 사람이 인지하기 어려운 perturbation을 유지한다.
+
+---
+
+## 5. 결과 저장 구조 자동화
+
+```text
+results/
+ └── CIFAR10/
+      └── FGSM/
+           └── Targeted/
+```
+
+구현:
+
 ```python
 if attack_name == "Targeted FGSM" or attack_name == "Untargeted FGSM":
     method = "FGSM"
@@ -90,23 +185,44 @@ else:
 save_dir = os.path.join('results', dataset_name, method, target_type)
 os.makedirs(save_dir, exist_ok=True)
 ```
-- `method` 와 `target_type` 을 정확히 구분해 폴더 구조를 자동 생성합니다.
 
-### 4. CIFAR‑10 이미지 업샘플링
+---
+
+## 6. 시각화 (Visualization)
+
+구성:
+- Original Image
+- Adversarial Image
+- Perturbation (×15 scaling)
+
+구현:
+
+```python
+noise_vis = perturbation * 15
+```
+
+업샘플링:
+
 ```python
 def upsample_img(img_np, scale=4):
-    """PIL bicubic 업샘플링으로 이미지를 scale 배 확대"""
     img_uint8 = np.clip(img_np * 255, 0, 255).astype(np.uint8)
     pil_img = Image.fromarray(img_uint8)
     new_size = (pil_img.width * scale, pil_img.height * scale)
     pil_img = pil_img.resize(new_size, Image.BICUBIC)
     return np.array(pil_img).astype(np.float32) / 255.0
 ```
-- 32×32 이미지를 4배(128×128) 확대해 시각적 품질을 크게 개선합니다.
 
-### 5. 시각화 내용
-- 원본 이미지, 공격 이미지, 그리고 **perturbation**(노이즈) 를 15배 확대해 3패널로 표시합니다.
-- CIFAR‑10 클래스 번호를 실제 클래스 이름(airplane, cat 등)으로 매핑해 가독성을 높였습니다.
+- CIFAR-10 (32×32) 이미지를 128×128로 확대하여 시각적 해석을 용이하게 한다.
+
+---
+
+## 요약
+
+- FGSM: 빠른 1-step 공격
+- PGD: 반복 기반 강력한 공격
+- Targeted / Untargeted 명확 분리
+- L∞ constraint 기반 perturbation 제어
+- 시각화 및 저장 구조까지 포함한 end-to-end 공격 분석 파이프라인 구현
 
 ## 참고 사항
 - **Targeted 공격 성공 기준**: 모델 예측이 지정한 목표 클래스와 일치해야 합니다.
