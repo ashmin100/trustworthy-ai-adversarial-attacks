@@ -71,8 +71,6 @@ else:
 
 ### 2. 정확한 공격 타입 판별
 ```python
-# 기존: is_targeted = "Targeted" in attack_name  (오류 발생 가능)
-# 수정 후:
 is_targeted = (attack_name == "Targeted FGSM" or attack_name == "Targeted PGD")
 ```
 - 문자열 포함이 아닌 **정확히 일치**하는 경우에만 Targeted 로 판단합니다.
