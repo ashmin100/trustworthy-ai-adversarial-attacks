@@ -359,14 +359,25 @@ def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cl
     
     fig, axes = plt.subplots(1, 3, figsize=(10, 3))
     
+    # CIFAR-10 클래스명 매핑 (숫자 -> 문자열 변환)
+    cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
+    if dataset_name == 'CIFAR10':
+        clean_pred_str = cifar_classes[clean_pred]
+        adv_pred_str = cifar_classes[adv_pred]
+        true_cls_str = cifar_classes[true_cls]
+        tgt_cls_str = cifar_classes[tgt_cls] if tgt_cls != -1 else "-1"
+    else:
+        clean_pred_str, adv_pred_str = str(clean_pred), str(adv_pred)
+        true_cls_str, tgt_cls_str = str(true_cls), str(tgt_cls)
+    
     axes[0].imshow(orig_img, cmap=cmap)
-    axes[0].set_title(f"Original\nPred: {clean_pred} (True: {true_cls})")
+    axes[0].set_title(f"Original\nPred: {clean_pred_str} (True: {true_cls_str})")
     axes[0].axis('off')
     
     if "Targeted" in attack_name:
-        title_adv = f"Adversarial\nPred: {adv_pred} (Target: {tgt_cls})"
+        title_adv = f"Adversarial\nPred: {adv_pred_str} (Target: {tgt_cls_str})"
     else:
-        title_adv = f"Adversarial\nPred: {adv_pred}"
+        title_adv = f"Adversarial\nPred: {adv_pred_str}"
         
     axes[1].imshow(adv_img, cmap=cmap)
     axes[1].set_title(title_adv)
