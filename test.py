@@ -9,9 +9,15 @@ import numpy as np
 import os
 import random
 from tqdm import tqdm
+from PIL import Image
 
-# 디바이스 설정 (GPU 사용 가능 시 cuda, 아니면 cpu)
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+# 디바이스 설정: CUDA(NVIDIA) > MPS(Apple Silicon) > CPU 순서로 자동 감지
+if torch.cuda.is_available():
+    device = torch.device('cuda')
+elif torch.backends.mps.is_available():
+    device = torch.device('mps')
+else:
+    device = torch.device('cpu')
 print(f"사용 중인 디바이스: {device}")
 
 # 재현성(Reproducibility)을 위한 난수 시드 고정
@@ -255,8 +261,9 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
     
     results = {}
     
-    # 가장 큰 노이즈(eps) 설정값에 대해 5장의 결과 이미지를 뽑습니다.
-    max_eps = max(epsilons)
+    # 가장 작은 epsilon(가장 은밀한 공격)에서 시각화 이미지를 저장합니다.
+    # → 사람 눈에 거의 인지 불가능한 수준의 섭동임을 보여주기 위함
+    min_eps = min(epsilons)
     
     for eps in epsilons:
         correct = 0
@@ -270,7 +277,8 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
         num_eval_samples = 500
         
         for images, labels in test_loader:
-            if total >= num_eval_samples:
+            # 500개 샘플 평가 후 종료하되, min_eps에서 시각화할 이미지를 5장 다 못 모았다면 추가 탐색
+            if total >= num_eval_samples and not (eps == min_eps and saved_images < 5):
                 break
                 
             images, labels = images.to(device), labels.to(device)
@@ -314,8 +322,9 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
                 # 공격 성공: 모델 예측이 실제 정답과 달라져야 함
                 success += (adv_preds != labels).sum().item()
                 
-            # 가장 큰 eps에서의 이미지를 선언한 디렉토리에 5장 저장합니다.
-            if eps == max_eps and saved_images < 5:
+            # 가장 작은 eps(가장 은밀한 공격)에서 이미지를 5장 저장합니다.
+            # → 사람이 육안으로 거의 구별 불가능한 수준의 섭동만 시각화합니다.
+            if eps == min_eps and saved_images < 5:
                 for i in range(len(labels)):
                     if saved_images >= 5:
                         break
@@ -342,20 +351,45 @@ def evaluate_attack(model, device, test_loader, attack_name, dataset_name, epsil
         
     return results
 
+def upsample_img(img_np, scale=4):
+    """
+    PIL bicubic 업샘플링으로 이미지를 scale배 확대합니다.
+    CIFAR-10처럼 저해상도(32x32) 이미지의 시각화 품질을 높이기 위해 사용합니다.
+    """
+    # float32 -> uint8 변환 후 PIL로 업샘플링
+    img_uint8 = np.clip(img_np * 255, 0, 255).astype(np.uint8)
+    pil_img = Image.fromarray(img_uint8)
+    new_size = (pil_img.width * scale, pil_img.height * scale)
+    pil_img = pil_img.resize(new_size, Image.BICUBIC)
+    return np.array(pil_img).astype(np.float32) / 255.0
+
 def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cls, attack_name, dataset_name, eps, idx):
-    if not os.path.exists('results'):
-        os.makedirs('results')
+    # 공격 방법과 타겟 여부 추출
+    method = 'FGSM' if 'FGSM' in attack_name else 'PGD'
+    target_type = 'Targeted' if 'Targeted' in attack_name else 'Untargeted'
+    
+    # 결과를 저장할 디렉토리 경로: results/{dataset}/{method}/{target_type}
+    save_dir = os.path.join('results', dataset_name, method, target_type)
+    os.makedirs(save_dir, exist_ok=True)
         
-    # 이미지가 (Channels, Height, Width) 이면 시각화를 위히 (H, W, C)로 변경
+    # 이미지가 (Channels, Height, Width) 이면 시각화를 위해 (H, W, C)로 변경
     if len(orig_img.shape) == 3 and orig_img.shape[0] == 3:
         orig_img = np.transpose(orig_img, (1, 2, 0))
         adv_img = np.transpose(adv_img, (1, 2, 0))
         cmap = None
+        is_color = True
     else:
         cmap = 'gray'
-        
-    # 사용자가 노이즈를 명확히 볼 수 있도록 노이즈 확대 (x5)
-    perturbation = np.clip(np.abs(adv_img - orig_img) * 5, 0, 1)
+        is_color = False
+    
+    # CIFAR-10(32x32)의 화질이 지나치게 낮아 보이는 문제를 PIL bicubic 업샘플링으로 보완
+    if is_color:
+        orig_img = upsample_img(orig_img, scale=4)   # 32x32 -> 128x128
+        adv_img  = upsample_img(adv_img,  scale=4)
+    
+    # 노이즈(perturbation)를 시각적으로 확대하여 표시 (x15)
+    # 실제 섭동은 매우 미세하기 때문에 크게 증폭해야 눈에 보임
+    perturbation = np.clip(np.abs(adv_img - orig_img) * 15, 0, 1)
     
     fig, axes = plt.subplots(1, 3, figsize=(10, 3))
     
@@ -363,32 +397,32 @@ def save_visualization(orig_img, adv_img, clean_pred, adv_pred, true_cls, tgt_cl
     cifar_classes = ['airplane', 'automobile', 'bird', 'cat', 'deer', 'dog', 'frog', 'horse', 'ship', 'truck']
     if dataset_name == 'CIFAR10':
         clean_pred_str = cifar_classes[clean_pred]
-        adv_pred_str = cifar_classes[adv_pred]
-        true_cls_str = cifar_classes[true_cls]
-        tgt_cls_str = cifar_classes[tgt_cls] if tgt_cls != -1 else "-1"
+        adv_pred_str   = cifar_classes[adv_pred]
+        true_cls_str   = cifar_classes[true_cls]
+        tgt_cls_str    = cifar_classes[tgt_cls] if tgt_cls != -1 else "-1"
     else:
         clean_pred_str, adv_pred_str = str(clean_pred), str(adv_pred)
         true_cls_str, tgt_cls_str = str(true_cls), str(tgt_cls)
     
-    axes[0].imshow(orig_img, cmap=cmap)
+    axes[0].imshow(orig_img, cmap=cmap, interpolation='bilinear')
     axes[0].set_title(f"Original\nPred: {clean_pred_str} (True: {true_cls_str})")
     axes[0].axis('off')
     
     if "Targeted" in attack_name:
-        title_adv = f"Adversarial\nPred: {adv_pred_str} (Target: {tgt_cls_str})"
+        title_adv = f"Adversarial (ε={eps})\nPred: {adv_pred_str} (Target: {tgt_cls_str})"
     else:
-        title_adv = f"Adversarial\nPred: {adv_pred_str}"
+        title_adv = f"Adversarial (ε={eps})\nPred: {adv_pred_str}"
         
-    axes[1].imshow(adv_img, cmap=cmap)
+    axes[1].imshow(adv_img, cmap=cmap, interpolation='bilinear')
     axes[1].set_title(title_adv)
     axes[1].axis('off')
     
-    axes[2].imshow(perturbation, cmap=cmap)
-    axes[2].set_title("Perturbation\n(Magnified)")
+    axes[2].imshow(perturbation, cmap=cmap, interpolation='bilinear')
+    axes[2].set_title(f"Perturbation\n(Magnified ×15)")
     axes[2].axis('off')
     
     plt.tight_layout()
-    filename = f"results/{dataset_name}_{attack_name.replace(' ', '_')}_eps{eps}_sample{idx}.png"
+    filename = os.path.join(save_dir, f"eps{eps:.2f}_sample{idx}.png")
     plt.savefig(filename, dpi=150)
     plt.close()
 
@@ -445,7 +479,7 @@ def main():
     print("\n====== 전체 평가 완료 ======")
     print("시각화 결과 이미지들은 'results' 폴더에 저장되었습니다.")
     
-    # 보고서 복사용 공격 성공률 요약 화면 출력
+    # 보고서용 공격 성공률 요약 화면 출력
     print("\n--- 보고서용 결과 요약(Markdown Table) ---")
     print("| 데이터셋 | 공격법 | $\\epsilon=0.05$ | $\\epsilon=0.10$ | $\\epsilon=0.20$ | $\\epsilon=0.30$ |")
     print("| :--- | :--- | :--- | :--- | :--- | :--- |")
